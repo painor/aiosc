@@ -23,18 +23,23 @@
 import asyncio
 import re
 import struct
+import inspect
+
 
 def singleton(cls):
     instance = cls()
     instance.__call__ = lambda: instance
     return instance
 
+
 @singleton
 class Impulse:
     pass
 
+
 OSC_ADDR_REGEXP = '[^ #*,/?[\]{}]'
 OSC_ADDR_SLASH_REGEXP = '[^ #*,?[\]{}]'
+
 
 # translate osc address pattern to regexp for use in message handlers
 def translate_pattern(pattern):
@@ -55,7 +60,7 @@ def translate_pattern(pattern):
             result += OSC_ADDR_REGEXP + '*'
         elif c == '[':
             j = pattern.index(']', i)
-            sub = pattern[i+1:j]
+            sub = pattern[i + 1:j]
             result += '['
             if sub.startswith('!'):
                 sub = sub[1:]
@@ -65,7 +70,7 @@ def translate_pattern(pattern):
             i = j
         elif c == '{':
             j = pattern.index('}', i)
-            sub = pattern[i+1:j]
+            sub = pattern[i + 1:j]
             result += '('
             result += '|'.join([re.escape(s) for s in sub.split(',')])
             result += ')'
@@ -75,17 +80,20 @@ def translate_pattern(pattern):
         i += 1
     return '^' + result + '$'
 
+
 # read padded string from the beginning of a packet and return (value, tail)
 def read_string(packet):
     actual_len = packet.index(b'\x00')
     padded_len = (actual_len // 4 + 1) * 4
     return str(packet[:actual_len], 'ascii'), packet[padded_len:]
 
+
 # read padded blob from the beginning of a packet and return (value, tail)
 def read_blob(packet):
     actual_len, tail = struct.unpack('>I', packet[:4])[0], packet[4:]
     padded_len = (actual_len // 4 + 1) * 4
     return tail[:padded_len][:actual_len], tail[padded_len:]
+
 
 def parse_message(packet):
     if packet.startswith(b'#bundle'):
@@ -121,6 +129,7 @@ def parse_message(packet):
 
     return (path, args)
 
+
 # convert string to padded osc string
 def pack_string(s):
     b = bytes(s + '\x00', 'ascii')
@@ -129,6 +138,7 @@ def pack_string(s):
         b = b.ljust(width, b'\x00')
     return b
 
+
 # convert bytes to padded osc blob
 def pack_blob(b):
     b = bytes(struct.pack('>I', len(b)) + b)
@@ -136,6 +146,7 @@ def pack_blob(b):
         width = (len(b) // 4 + 1) * 4
         b = b.ljust(width, b'\x00')
     return b
+
 
 def pack_message(path, *args):
     result = b''
@@ -167,11 +178,20 @@ def pack_message(path, *args):
         result = result.ljust(width, b'\x00')
     return result
 
+
 class OSCProtocol(asyncio.DatagramProtocol):
     def __init__(self, handlers=None):
         super().__init__()
         self._handlers = []
+        self.loop = asyncio.get_event_loop()
+        if handlers:
+            for pattern, handler in handlers.items():
+                pattern_re = re.compile(translate_pattern(pattern))
+                self._handlers.append((pattern_re, handler))
 
+    def setup_handlers(self, handlers):
+        self._handlers = []
+        self.loop = asyncio.get_event_loop()
         if handlers:
             for pattern, handler in handlers.items():
                 pattern_re = re.compile(translate_pattern(pattern))
@@ -186,10 +206,15 @@ class OSCProtocol(asyncio.DatagramProtocol):
         # dispatch the message
         for pattern_re, handler in self._handlers:
             if pattern_re.match(path):
-                handler(addr, path, *args)
+
+                result = handler(addr, path, *args)
+
+                if inspect.iscoroutine(result):
+                    self.loop.create_task(result)
 
     def send(self, path, *args, addr=None):
         return self.transport.sendto(pack_message(path, *args), addr=addr)
+
 
 async def send(target, path, *args, loop=None):
     loop = loop or asyncio.get_event_loop()
